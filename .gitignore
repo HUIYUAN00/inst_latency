@@ -1,0 +1,39 @@
+# 编译产物
+sve_latency_test
+sve_latency_test_optimized
+*.o
+*.out
+*.exe
+
+# 分析工具临时产物
+analyze_precision
+error_budget
+check_timer
+
+# 测试日志
+test_output.log
+result_*.log
+
+# 临时文件
+*.tmp
+*.bak
+*~
+.DS_Store
+
+# IDE/编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+viminfo
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Git临时文件
+*.orig
+*.MERGE
+*.HEAD
