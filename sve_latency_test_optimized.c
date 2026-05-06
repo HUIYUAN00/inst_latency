@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
 #include <math.h>
 #include <unistd.h>
 
@@ -10,17 +9,15 @@
 #include <arm_sve.h>
 #endif
 
-#define ITERATIONS 10000000
+#define DEFAULT_ITERATIONS 10000000
+#define DEFAULT_NUM_RUNS 10
 #define UNROLL_FACTOR 32
-#define NUM_RUNS 10
 #define ARRAY_SIZE (1024 * 1024)
-#define CALIBRATION_ITERATIONS 100000
 
-typedef struct {
-    const char *name;
-    double precision_ns;
-    uint64_t cpu_freq_hz;
-} timer_info_t;
+static int g_iterations = DEFAULT_ITERATIONS;
+static int g_num_runs = DEFAULT_NUM_RUNS;
+
+typedef void (*test_asm_func_t)(uint64_t iter_count, uint64_t param);
 
 typedef struct {
     double mean;
@@ -31,7 +28,6 @@ typedef struct {
     double error_pct;
 } stats_t;
 
-static timer_info_t g_timer_info = {0};
 static uint64_t g_cntfrq_hz = 0;
 static double g_tick_to_ns_factor = 0;
 static double g_loop_overhead_ns = 0;
@@ -56,15 +52,13 @@ static void init_timer_backend(void) {
     g_cntfrq_hz = get_cntfrq();
     g_tick_to_ns_factor = 1e9 / (double)g_cntfrq_hz;
     
-    g_timer_info.cpu_freq_hz = get_cpu_frequency();
-    g_timer_info.name = "System Counter";
-    g_timer_info.precision_ns = g_tick_to_ns_factor;
+    uint64_t cpu_freq_hz = get_cpu_frequency();
     
     printf("=== System Counter Timer ===\n");
     printf("Method: cntvct_el0 (system counter)\n");
-    printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
+    printf("Resolution: %.2f ns per tick\n", g_tick_to_ns_factor);
     printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
-    printf("CPU Frequency: %.3f GHz\n", g_timer_info.cpu_freq_hz / 1e9);
+    printf("CPU Frequency: %.3f GHz\n", cpu_freq_hz / 1e9);
 }
 
 static double get_time_ns(void) {
@@ -111,10 +105,10 @@ static void warmup_cache(void) {
 }
 
 static void calibrate_loop_overhead(void) {
-    uint64_t iter_count = ITERATIONS / UNROLL_FACTOR;
-    double overheads[NUM_RUNS];
+    uint64_t iter_count = g_iterations / UNROLL_FACTOR;
+    double overheads[g_num_runs];
     
-    for (int run = 0; run < NUM_RUNS; run++) {
+    for (int run = 0; run < g_num_runs; run++) {
         asm volatile("isb" ::: "memory");
         double start = get_time_ns();
         asm volatile("isb" ::: "memory");
@@ -136,12 +130,12 @@ static void calibrate_loop_overhead(void) {
         overheads[run] = end - start;
     }
     
-    stats_t s = compute_detailed_stats(overheads, NUM_RUNS);
+    stats_t s = compute_detailed_stats(overheads, g_num_runs);
     g_loop_overhead_ns = s.mean;
     
     printf("\n=== Loop Overhead Calibration ===\n");
     printf("Overhead: %.3f ns (mean) ± %.3f ns (SEM)\n", s.mean, s.sem);
-    printf("Per-iteration: %.6f ns\n", s.mean / ITERATIONS);
+    printf("Per-iteration: %.6f ns\n", s.mean / g_iterations);
     printf("Error contribution: %.2f%%\n", s.error_pct);
 }
 
@@ -160,6 +154,171 @@ static void print_result_with_precision(const char *test_name, stats_t s) {
     printf("Throughput: %.2f M ops/sec\n", 1000.0 / s.mean);
 }
 
+static stats_t run_performance_test(const char *name, test_asm_func_t test_asm, uint64_t param) {
+    uint64_t iter_count = g_iterations / UNROLL_FACTOR;
+    double results[g_num_runs];
+    
+    for (int run = 0; run < g_num_runs; run++) {
+        asm volatile("isb" ::: "memory");
+        double start = get_time_ns();
+        asm volatile("isb" ::: "memory");
+        
+        test_asm(iter_count, param);
+        
+        asm volatile("isb" ::: "memory");
+        double end = get_time_ns();
+        asm volatile("isb" ::: "memory");
+        
+        double elapsed_ns = end - start;
+        double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
+        results[run] = adjusted_ns / (double)g_iterations;
+    }
+    
+    stats_t s = compute_detailed_stats(results, g_num_runs);
+    print_result_with_precision(name, s);
+    return s;
+}
+
+static void asm_ldr_throughput(uint64_t iter_count, uint64_t param) {
+    uint64_t *data = (uint64_t *)param;
+    asm volatile (
+        "mov x1, %[count]\n"
+        "mov x2, %[ptr]\n"
+        "1:\n"
+        "ldr x3, [x2]\n"
+        "ldr x4, [x2, #8]\n"
+        "ldr x5, [x2, #16]\n"
+        "ldr x6, [x2, #24]\n"
+        "ldr x7, [x2, #32]\n"
+        "ldr x8, [x2, #40]\n"
+        "ldr x9, [x2, #48]\n"
+        "ldr x10, [x2, #56]\n"
+        "ldr x11, [x2, #64]\n"
+        "ldr x12, [x2, #72]\n"
+        "ldr x13, [x2, #80]\n"
+        "ldr x14, [x2, #88]\n"
+        "ldr x15, [x2, #96]\n"
+        "ldr x16, [x2, #104]\n"
+        "ldr x17, [x2, #112]\n"
+        "ldr x18, [x2, #120]\n"
+        "ldr x19, [x2, #128]\n"
+        "ldr x20, [x2, #136]\n"
+        "ldr x21, [x2, #144]\n"
+        "ldr x22, [x2, #152]\n"
+        "ldr x23, [x2, #160]\n"
+        "ldr x24, [x2, #168]\n"
+        "ldr x25, [x2, #176]\n"
+        "ldr x26, [x2, #184]\n"
+        "ldr x27, [x2, #192]\n"
+        "ldr x28, [x2, #200]\n"
+        "ldr x3, [x2, #208]\n"
+        "ldr x4, [x2, #216]\n"
+        "ldr x5, [x2, #224]\n"
+        "ldr x6, [x2, #232]\n"
+        "subs x1, x1, #1\n"
+        "b.ne 1b\n"
+        : 
+        : [count] "r" (iter_count), [ptr] "r" (data)
+        : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+          "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
+          "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+          "x28", "memory", "cc"
+    );
+}
+
+static void asm_ldr_latency(uint64_t iter_count, uint64_t param) {
+    asm volatile (
+        "mov x1, %[count]\n"
+        "mov x0, %[ptr]\n"
+        "1:\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "ldr x0, [x0]\n"
+        "subs x1, x1, #1\n"
+        "b.ne 1b\n"
+        : 
+        : [count] "r" (iter_count), [ptr] "r" (param)
+        : "x0", "x1", "memory", "cc"
+    );
+}
+
+static void asm_fmla_latency(uint64_t iter_count, uint64_t param) {
+    (void)param;
+    asm volatile (
+        "mov x0, %[count]\n"
+        "ptrue p0.s\n"
+        "fmov z0.s, #1.0\n"
+        "fmov z1.s, #2.0\n"
+        "fmov z2.s, #3.0\n"
+        "1:\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "fmla z0.s, p0/m, z1.s, z2.s\n"
+        "subs x0, x0, #1\n"
+        "b.ne 1b\n"
+        : 
+        : [count] "r" (iter_count)
+        : "x0", "p0", "z0", "z1", "z2", "cc"
+    );
+}
+
 static void test_ldr_throughput_optimized(void) {
     uint64_t *data = (uint64_t *)aligned_alloc(64, ARRAY_SIZE * sizeof(uint64_t));
     if (!data) {
@@ -171,70 +330,7 @@ static void test_ldr_throughput_optimized(void) {
         data[i] = (uint64_t)&data[(i + 8) & (ARRAY_SIZE - 1)];
     }
     
-    double results[NUM_RUNS];
-    uint64_t iter_count = ITERATIONS / UNROLL_FACTOR;
-    
-    for (int run = 0; run < NUM_RUNS; run++) {
-        asm volatile("isb" ::: "memory");
-        double start = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        asm volatile (
-            "mov x1, %[count]\n"
-            "mov x2, %[ptr]\n"
-            "1:\n"
-            "ldr x3, [x2]\n"
-            "ldr x4, [x2, #8]\n"
-            "ldr x5, [x2, #16]\n"
-            "ldr x6, [x2, #24]\n"
-            "ldr x7, [x2, #32]\n"
-            "ldr x8, [x2, #40]\n"
-            "ldr x9, [x2, #48]\n"
-            "ldr x10, [x2, #56]\n"
-            "ldr x11, [x2, #64]\n"
-            "ldr x12, [x2, #72]\n"
-            "ldr x13, [x2, #80]\n"
-            "ldr x14, [x2, #88]\n"
-            "ldr x15, [x2, #96]\n"
-            "ldr x16, [x2, #104]\n"
-            "ldr x17, [x2, #112]\n"
-            "ldr x18, [x2, #120]\n"
-            "ldr x19, [x2, #128]\n"
-            "ldr x20, [x2, #136]\n"
-            "ldr x21, [x2, #144]\n"
-            "ldr x22, [x2, #152]\n"
-            "ldr x23, [x2, #160]\n"
-            "ldr x24, [x2, #168]\n"
-            "ldr x25, [x2, #176]\n"
-            "ldr x26, [x2, #184]\n"
-            "ldr x27, [x2, #192]\n"
-            "ldr x28, [x2, #200]\n"
-            "ldr x3, [x2, #208]\n"
-            "ldr x4, [x2, #216]\n"
-            "ldr x5, [x2, #224]\n"
-            "ldr x6, [x2, #232]\n"
-            "subs x1, x1, #1\n"
-            "b.ne 1b\n"
-            : 
-            : [count] "r" (iter_count), [ptr] "r" (data)
-            : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
-              "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
-              "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
-              "x28", "memory", "cc"
-        );
-        
-        asm volatile("isb" ::: "memory");
-        double end = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        double elapsed_ns = end - start;
-        double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
-        results[run] = adjusted_ns / (double)ITERATIONS;
-    }
-    
-    stats_t s = compute_detailed_stats(results, NUM_RUNS);
-    print_result_with_precision("LDR Throughput", s);
-    
+    run_performance_test("LDR Throughput", asm_ldr_throughput, (uint64_t)data);
     free(data);
 }
 
@@ -250,161 +346,57 @@ static void test_ldr_latency_optimized(void) {
     }
     data[ARRAY_SIZE - 1] = (uint64_t)&data[0];
     
-    double results[NUM_RUNS];
-    uint64_t iter_count = ITERATIONS / UNROLL_FACTOR;
-    uint64_t ptr_val = (uint64_t)data;
-    
-    for (int run = 0; run < NUM_RUNS; run++) {
-        asm volatile("isb" ::: "memory");
-        double start = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        asm volatile (
-            "mov x1, %[count]\n"
-            "mov x0, %[ptr]\n"
-            "1:\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "ldr x0, [x0]\n"
-            "subs x1, x1, #1\n"
-            "b.ne 1b\n"
-            : 
-            : [count] "r" (iter_count), [ptr] "r" (ptr_val)
-            : "x0", "x1", "memory", "cc"
-        );
-        
-        asm volatile("isb" ::: "memory");
-        double end = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        double elapsed_ns = end - start;
-        double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
-        results[run] = adjusted_ns / (double)ITERATIONS;
-    }
-    
-    stats_t s = compute_detailed_stats(results, NUM_RUNS);
-    print_result_with_precision("LDR Latency (Dependency Chain)", s);
-    
-free(data);
+    run_performance_test("LDR Latency (Dependency Chain)", asm_ldr_latency, (uint64_t)data);
+    free(data);
 }
 
 static void test_fmla_latency_optimized(void) {
-    double results[NUM_RUNS];
-    uint64_t iter_count = ITERATIONS / UNROLL_FACTOR;
-    
-    for (int run = 0; run < NUM_RUNS; run++) {
-        asm volatile("isb" ::: "memory");
-        double start = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        asm volatile (
-            "mov x0, %[count]\n"
-            "ptrue p0.s\n"
-            "fmov z0.s, #1.0\n"
-            "fmov z1.s, #2.0\n"
-            "fmov z2.s, #3.0\n"
-            "1:\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "subs x0, x0, #1\n"
-            "b.ne 1b\n"
-            : 
-            : [count] "r" (iter_count)
-            : "x0", "p0", "z0", "z1", "z2", "cc"
-        );
-        
-        asm volatile("isb" ::: "memory");
-        double end = get_time_ns();
-        asm volatile("isb" ::: "memory");
-        
-        double elapsed_ns = end - start;
-        double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
-        results[run] = adjusted_ns / (double)ITERATIONS;
-    }
-    
-    stats_t s = compute_detailed_stats(results, NUM_RUNS);
-    print_result_with_precision("FMLA (SVE) Latency", s);
+    run_performance_test("FMLA (SVE) Latency", asm_fmla_latency, 0);
 }
 
 static void print_precision_summary(void) {
     printf("\n=== Precision Analysis Summary ===\n");
-    printf("Timer: %s\n", g_timer_info.name);
-    printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
+    printf("Timer: System Counter (cntvct_el0)\n");
+    printf("Resolution: %.2f ns per tick\n", g_tick_to_ns_factor);
     printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
     
     printf("\nMeasurement methodology:\n");
-    printf("  Iterations: %d per test\n", ITERATIONS);
-    printf("  Statistical runs: %d\n", NUM_RUNS);
+    printf("  Iterations: %d per test\n", g_iterations);
+    printf("  Statistical runs: %d\n", g_num_runs);
     printf("  Effective resolution: %.6f ns\n", 
-           g_timer_info.precision_ns / (double)ITERATIONS);
+           g_tick_to_ns_factor / (double)g_iterations);
 }
 
-int main(void) {
+static void parse_args(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc) {
+            g_iterations = atoi(argv[i + 1]);
+            i++;
+        } else if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
+            g_num_runs = atoi(argv[i + 1]);
+            i++;
+        } else if (strcmp(argv[i], "--help") == 0) {
+            printf("Usage: %s [options]\n", argv[0]);
+            printf("Options:\n");
+            printf("  --iterations <num>  Set iterations per test (default: %d)\n", DEFAULT_ITERATIONS);
+            printf("  --runs <num>        Set statistical runs (default: %d)\n", DEFAULT_NUM_RUNS);
+            printf("  --help              Show this help\n");
+            exit(0);
+        }
+    }
+}
+
+int main(int argc, char **argv) {
 #ifndef __ARM_FEATURE_SVE
     printf("Error: SVE is not supported on this platform!\n");
     printf("Please compile with -march=armv8-a+sve flag\n");
     return 1;
 #endif
     
-    printf("AArch64 SVE Instruction Latency Test (High-Precision)\n");
-    printf("=====================================================\n\n");
+    parse_args(argc, argv);
+    
+    printf("AArch64 SVE Instruction Latency Test\n");
+    printf("====================================\n\n");
     
 #ifdef __ARM_FEATURE_SVE
     printf("SVE Vector Length: %lu bits (%lu bytes)\n", 
@@ -414,8 +406,8 @@ int main(void) {
     init_timer_backend();
     
     printf("\nTest Configuration:\n");
-    printf("  Iterations: %d (unroll: %d)\n", ITERATIONS, UNROLL_FACTOR);
-    printf("  Statistical runs: %d (with SEM error)\n", NUM_RUNS);
+    printf("  Iterations: %d (unroll: %d)\n", g_iterations, UNROLL_FACTOR);
+    printf("  Statistical runs: %d (with SEM error)\n", g_num_runs);
     printf("  Array size: %d KB\n", ARRAY_SIZE * 8 / 1024);
     
     printf("\nInitializing...\n");
@@ -428,7 +420,7 @@ int main(void) {
     
     print_precision_summary();
     
-    printf("\n=====================================================\n");
+    printf("\n====================================\n");
     printf("Test completed!\n");
     printf("\nNote: Error margins (SEM) represent statistical uncertainty.\n");
     printf("      Sub-ns precision achieved via time accumulation.\n");
