@@ -16,12 +16,6 @@
 #define ARRAY_SIZE (1024 * 1024)
 #define CALIBRATION_ITERATIONS 100000
 
-typedef enum {
-    TIMER_PMU_CYCLES,
-    TIMER_CNTVCT,
-    TIMER_AUTO
-} timer_mode_t;
-
 typedef struct {
     const char *name;
     double precision_ns;
@@ -37,9 +31,7 @@ typedef struct {
     double error_pct;
 } stats_t;
 
-static timer_mode_t g_timer_mode = TIMER_AUTO;
 static timer_info_t g_timer_info = {0};
-static int g_pmu_available = 0;
 static uint64_t g_cntfrq_hz = 0;
 static double g_tick_to_ns_factor = 0;
 static double g_loop_overhead_ns = 0;
@@ -54,40 +46,6 @@ static uint64_t get_cntvct(void) {
     uint64_t cnt;
     asm volatile ("isb\n mrs %[cnt], cntvct_el0\n isb" : [cnt] "=r" (cnt));
     return cnt;
-}
-
-static uint64_t get_pmu_cycles(void) {
-    uint64_t cycles;
-    asm volatile ("isb\n mrs %[cycles], pmccntr_el0\n isb" : [cycles] "=r" (cycles));
-    return cycles << 1;
-}
-
-static int check_pmu_access(void) {
-    uint64_t pmuseren = 0;
-    asm volatile ("mrs %[pmuseren], pmuserenr_el0" : [pmuseren] "=r" (pmuseren));
-    return (pmuseren & 0x1) != 0;
-}
-
-static int enable_pmu_counter(void) {
-    uint64_t pmcr;
-    asm volatile ("mrs %[pmcr], pmcr_el0" : [pmcr] "=r" (pmcr));
-    
-    pmcr |= (1 << 0);
-    pmcr |= (1 << 2);
-    
-    asm volatile (
-        "msr pmcr_el0, %[pmcr]\n"
-        "msr pmcntenset_el0, %[enable]\n"
-        "isb\n"
-        :
-        : [pmcr] "r" (pmcr), [enable] "r" (0x80000000ULL)
-    );
-    
-    uint64_t c1, c2;
-    asm volatile ("isb\n mrs %[c], pmccntr_el0\n isb" : [c] "=r" (c1));
-    asm volatile ("isb\n mrs %[c], pmccntr_el0\n isb" : [c] "=r" (c2));
-    
-    return (c2 > c1 || c1 == c2);
 }
 
 static uint64_t calibrate_cpu_frequency(void) {
@@ -111,23 +69,6 @@ static uint64_t calibrate_cpu_frequency(void) {
         fclose(fp);
     }
     
-    uint64_t cntvct_start = get_cntvct();
-    uint64_t cycles_start = g_pmu_available ? get_pmu_cycles() : 0;
-    
-    usleep(100000);
-    
-    uint64_t cntvct_end = get_cntvct();
-    uint64_t cycles_end = g_pmu_available ? get_pmu_cycles() : 0;
-    
-    uint64_t cntvct_ticks = cntvct_end - cntvct_start;
-    double elapsed_ns = (double)cntvct_ticks * g_tick_to_ns_factor;
-    
-    if (g_pmu_available && cycles_end > cycles_start) {
-        uint64_t elapsed_cycles = cycles_end - cycles_start;
-        double measured_freq = elapsed_cycles / (elapsed_ns / 1e9);
-        return (uint64_t)measured_freq;
-    }
-    
     return 2200000000ULL;
 }
 
@@ -135,49 +76,20 @@ static void init_timer_backend(void) {
     g_cntfrq_hz = get_cntfrq();
     g_tick_to_ns_factor = 1e9 / (double)g_cntfrq_hz;
     
-    g_pmu_available = check_pmu_access();
-    if (g_pmu_available) {
-        g_pmu_available = enable_pmu_counter();
-    }
-    
-    if (g_timer_mode == TIMER_AUTO) {
-        g_timer_mode = g_pmu_available ? TIMER_PMU_CYCLES : TIMER_CNTVCT;
-    }
-    
     g_timer_info.cpu_freq_hz = calibrate_cpu_frequency();
-    double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
+    g_timer_info.name = "System Counter";
+    g_timer_info.precision_ns = g_tick_to_ns_factor;
     
-    if (g_timer_mode == TIMER_PMU_CYCLES && g_pmu_available) {
-        g_timer_info.name = "PMU Cycles";
-        g_timer_info.precision_ns = cycle_to_ns;
-        printf("=== High-Precision Timer (PMU Cycles) ===\n");
-        printf("Status: ENABLED\n");
-        printf("Method: pmccntr_el0 (CPU cycle counter)\n");
-        printf("Resolution: %.3f ns per cycle\n", g_timer_info.precision_ns);
-        printf("CPU Frequency: %.3f GHz (calibrated)\n", g_timer_info.cpu_freq_hz / 1e9);
-        printf("Precision Improvement: %.0fx vs system counter\n", 
-               (g_tick_to_ns_factor / cycle_to_ns));
-    } else {
-        g_timer_info.name = "System Counter";
-        g_timer_info.precision_ns = g_tick_to_ns_factor;
-        printf("=== Standard Timer (System Counter) ===\n");
-        printf("Status: PMU unavailable, using fallback\n");
-        printf("Method: cntvct_el0 (system counter)\n");
-        printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
-        printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
-        printf("CPU Frequency: %.3f GHz\n", g_timer_info.cpu_freq_hz / 1e9);
-    }
+    printf("=== System Counter Timer ===\n");
+    printf("Method: cntvct_el0 (system counter)\n");
+    printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
+    printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
+    printf("CPU Frequency: %.3f GHz\n", g_timer_info.cpu_freq_hz / 1e9);
 }
 
 static double get_time_ns(void) {
-    if (g_timer_mode == TIMER_PMU_CYCLES && g_pmu_available) {
-        uint64_t cycles = get_pmu_cycles();
-        double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
-        return (double)cycles * cycle_to_ns;
-    } else {
-        uint64_t ticks = get_cntvct();
-        return (double)ticks * g_tick_to_ns_factor;
-    }
+    uint64_t ticks = get_cntvct();
+    return (double)ticks * g_tick_to_ns_factor;
 }
 
 static stats_t compute_detailed_stats(double *values, int n) {
@@ -257,14 +169,6 @@ static void print_result_with_precision(const char *test_name, stats_t s) {
     double relative_error = s.error_pct;
     
     printf("\n=== %s ===\n", test_name);
-    
-    if (g_timer_mode == TIMER_PMU_CYCLES) {
-        double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
-        double cycles = s.mean / cycle_to_ns;
-        double cycles_error = s.sem / cycle_to_ns;
-        printf("Cycles: %.2f cycles (mean) ± %.2f cycles\n", cycles, cycles_error);
-    }
-    
     printf("Latency: %.3f ns (mean) ± %.3f ns (SEM)\n", s.mean, s.sem);
     printf("Range: [%.3f, %.3f] ns\n", s.min, s.max);
     printf("Relative error: ±%.2f%%\n", relative_error);
@@ -499,22 +403,11 @@ static void test_fmla_latency_optimized(void) {
     print_result_with_precision("FMLA (SVE) Latency", s);
 }
 
-static void print_precision_comparison(void) {
+static void print_precision_summary(void) {
     printf("\n=== Precision Analysis Summary ===\n");
-    
-    double pmu_precision = 1e9 / (double)g_timer_info.cpu_freq_hz;
-    double cntvct_precision = g_tick_to_ns_factor;
-    
-    printf("Timer precision comparison:\n");
-    if (g_timer_mode == TIMER_PMU_CYCLES) {
-        printf("  PMU cycles: %.3f ns (current)\n", pmu_precision);
-        printf("  cntvct: %.2f ns (alternative)\n", cntvct_precision);
-        printf("  Improvement: %.0fx\n", cntvct_precision / pmu_precision);
-    } else {
-        printf("  cntvct: %.2f ns (current)\n", cntvct_precision);
-        printf("  PMU cycles: %.3f ns (ideal, not available)\n", pmu_precision);
-        printf("  Potential improvement: %.0fx\n", cntvct_precision / pmu_precision);
-    }
+    printf("Timer: %s\n", g_timer_info.name);
+    printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
+    printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
     
     printf("\nMeasurement methodology:\n");
     printf("  Iterations: %d per test\n", ITERATIONS);
@@ -553,7 +446,7 @@ int main(void) {
     test_ldr_latency_optimized();
     test_fmla_latency_optimized();
     
-    print_precision_comparison();
+    print_precision_summary();
     
     printf("\n=====================================================\n");
     printf("Test completed!\n");
