@@ -555,7 +555,6 @@ static void print_precision_comparison(void) {
     
     printf("\nMeasurement methodology:\n");
     printf("  Iterations: %d per test\n", ITERATIONS);
-    printf("  Accumulation: %.2f ms per test\n", (ITERATIONS * 0.2) / 1e6);
     printf("  Statistical runs: %d\n", NUM_RUNS);
     printf("  Effective resolution: %.6f ns\n", 
            g_timer_precision_ns / (double)ITERATIONS);

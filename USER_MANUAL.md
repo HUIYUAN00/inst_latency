@@ -64,7 +64,6 @@
 | **操作系统** | Linux (内核≥4.15) |
 | **编译器** | GCC ≥9.0 或 Clang ≥10.0 |
 | **C库** | glibc或musl |
-| **Python** | ≥3.6（对比工具，可选） |
 
 ### 2.3 权限要求
 
@@ -88,59 +87,56 @@ sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
 ### 3.1 编译
 
 ```bash
-# 克隆或进入项目目录
+# 进入项目目录
 cd inst_latency
 
-# 编译所有版本
-make all
+# 编译
+make
 
-# 仅编译优化版（推荐）
-make sve_latency_test_optimized
-
-# 仅编译原版（对比）
-make sve_latency_test
+# 清理
+make clean
 ```
 
 **编译输出**:
 ```
-gcc -O3 -march=armv8-a+sve -Wall -Wextra -g -o sve_latency_test sve_latency_test.c -lm
 gcc -O3 -march=armv8-a+sve -Wall -Wextra -g -o sve_latency_test_optimized sve_latency_test_optimized.c -lm
 ```
 
 ### 3.2 运行
 
 ```bash
-# 运行优化版（推荐）
-make run-optimized
+# 编译并运行
+make run
 
 # 或直接运行
 ./sve_latency_test_optimized
-
-# 运行原版（对比）
-make run-original
-./sve_latency_test
 ```
 
 ### 3.3 查看结果
 
-```bash
-# 实时查看输出
-./sve_latency_test_optimized
+```
+=== High-Precision Timer (PMU Cycles) ===
+Status: ENABLED
+Method: pmccntr_el0 (CPU cycle counter)
+Resolution: 0.455 ns per cycle
+CPU Frequency: 2.200 GHz (calibrated)
+Precision Improvement: 22x vs system counter
 
-# 对比分析
-make compare
-python3 compare_results.py
+=== LDR Throughput ===
+Latency: 0.128 ns (mean) ± 0.001 ns (SEM)
+Range: [0.128, 0.129] ns
+Relative error: ±0.11%
+Throughput: 7805.54 M ops/sec
 ```
 
 ---
 
 ## 详细使用说明
 
-### 4.1 命令行参数
+### 4.1 配置参数
 
-目前工具通过源码宏配置，未来版本将支持命令行参数。
+目前工具通过源码宏配置：
 
-**当前配置方式**（修改源码）:
 ```c
 // sve_latency_test_optimized.c
 
@@ -224,7 +220,6 @@ Timer precision comparison:
 
 Measurement methodology:
   Iterations: 10000000 per test           ← 迭代次数
-  Accumulation: 2.00 ms per test          ← 累积时间
   Statistical runs: 10                    ← 统计采样数
   Effective resolution: 0.000001 ns       ← 有效分辨率
 ```
@@ -244,16 +239,11 @@ Measurement methodology:
 | **Range** | [最小值, 最大值] | 观察数据分散程度 |
 | **error_pct** | 相对误差=SEM/mean×100% | 评估测量可靠性 |
 
-#### SEM vs stddev的区别
+#### SEM的含义
 
 ```
-stddev (标准差): 单次测量的分散程度
-  - 用于评估重复性
-  - 原版使用，但误导（显示0实际误差大）
-
 SEM (标准误差): 均值的不确定性
   - 用于评估测量精度
-  - 优化版使用，更准确
   - SEM = stddev / sqrt(n)
   - 增加采样次数可降低SEM
 ```
@@ -481,21 +471,6 @@ static void warmup_cache_enhanced(void) {
 }
 ```
 
-### 7.4 输出详细度控制
-
-```c
-// 添加输出级别控制
-typedef enum {
-    OUTPUT_MINIMAL,    // 仅输出均值
-    OUTPUT_STANDARD,   // 均值+SEM+误差%（当前）
-    OUTPUT_DETAILED,   // 完整统计+分位数
-    OUTPUT_VERBOSE     // 包含每次测量原始数据
-} output_level_t;
-
-// 在源码中添加控制开关
-static output_level_t g_output_level = OUTPUT_STANDARD;
-```
-
 ---
 
 ## 常见问题
@@ -514,10 +489,10 @@ static output_level_t g_output_level = OUTPUT_STANDARD;
 gcc --version  # 需要≥9.0
 
 # 添加编译选项
-gcc -march=armv8-a+sve sve_latency_test.c
+gcc -march=armv8-a+sve sve_latency_test_optimized.c
 
 # 或使用armclang
-armclang -march=armv8.2-a+sve sve_latency_test.c
+armclang -march=armv8.2-a+sve sve_latency_test_optimized.c
 ```
 
 **问题2: PMU寄存器未定义**
@@ -615,17 +590,6 @@ Relative error: ±50% (预期<5%)
 
 // 启用PMU（如果可用）
 ```
-
-### 8.4 环境兼容性
-
-**问题: 不同Linux发行版**
-
-| 发行版 | GCC版本 | 编译选项 |
-|-------|---------|---------|
-| Ubuntu 20.04 | GCC 9.3 | `-march=armv8-a+sve` |
-| CentOS 8 | GCC 8.5 | 需升级GCC或使用armclang |
-| Arch Linux | GCC 11+ | 标准选项即可 |
-| Debian 11 | GCC 10.2 | 标准选项即可 |
 
 ---
 
@@ -767,16 +731,13 @@ Relative error: ±50% (预期<5%)
 # 1. 禁用省电模式
 sudo cpupower frequency-set -g performance
 
-# 2. 禁用动态调频
-echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
-
-# 3. 绑定CPU核心
+# 2. 绑定CPU核心
 taskset -c 0 ./sve_latency_test_optimized
 
-# 4. 提升优先级
+# 3. 提升优先级
 sudo nice -n -20 ./sve_latency_test_optimized
 
-# 5. 禁用其他干扰
+# 4. 禁用其他干扰
 # 建议在最小系统环境下测试
 ```
 
@@ -790,80 +751,13 @@ sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
 sudo cpupower frequency-set -g performance
 
 # 2. 编译
-make clean && make all
+make clean && make
 
 # 3. 多次测试取稳定值
 for i in {1..5}; do
     taskset -c 0 ./sve_latency_test_optimized | tee result_$i.log
     sleep 2
 done
-
-# 4. 分析结果
-python3 analyze_results.py result_*.log
-```
-
-### 10.3 数据处理建议
-
-```python
-# compare_results.py 增强版
-
-import numpy as np
-
-def analyze_stability(log_files):
-    """分析多次测试的稳定性"""
-    means = []
-    sems = []
-    
-    for log in log_files:
-        # 解析均值和SEM
-        mean, sem = parse_result(log)
-        means.append(mean)
-        sems.append(sem)
-    
-    # 计算跨测试稳定性
-    overall_mean = np.mean(means)
-    overall_std = np.std(means)
-    stability = overall_std / overall_mean * 100
-    
-    print(f"Overall mean: {overall_mean:.3f} ns")
-    print(f"Stability: ±{stability:.2f}%")
-    
-    # 稳定性判断
-    if stability < 1:
-        print("✓ Excellent stability")
-    elif stability < 5:
-        print("✓ Good stability")
-    else:
-        print("⚠ Poor stability, check environment")
-```
-
-### 10.4 结果报告建议
-
-```markdown
-# 测试报告模板
-
-## 测试环境
-- CPU型号: [填写]
-- CPU频率: [填写]
-- SVE向量长度: [填写]
-- 计时器模式: PMU/cntvct
-- 系统版本: [填写]
-
-## 测试结果
-
-| 指令 | 延迟(ns) | 误差(%) | 吞吐量(M ops/s) |
-|-----|---------|---------|----------------|
-| LDR吞吐 | 0.128 | 0.11 | 7805 |
-| LDR延迟 | 1.873 | 0.03 | 534 |
-| FMLA延迟 | 0.897 | 0.05 | 1115 |
-
-## 精度分析
-- 计时器精度: [PMU: 0.45ns / cntvct: 10ns]
-- 有效精度: [填写]
-- 综合误差: [填写]
-
-## 结论
-[填写测试结论和分析]
 ```
 
 ---
@@ -874,16 +768,12 @@ def analyze_stability(log_files):
 
 ```bash
 # 编译
-make all                    # 编译所有版本
-make sve_latency_test_optimized  # 仅编译优化版
+make                    # 编译程序
+make clean              # 清理编译产物
 
 # 运行
-make run-optimized          # 运行优化版
-make run-original           # 运行原版
-make compare                # 对比分析
-
-# 清理
-make clean                  # 清理所有编译产物
+make run                # 编译并运行
+./sve_latency_test_optimized  # 直接运行
 
 # PMU权限
 cat /proc/sys/kernel/perf_event_paranoid  # 查看权限
@@ -891,22 +781,18 @@ sudo echo 0 > /proc/sys/kernel/perf_event_paranoid  # 启用
 
 # CPU设置
 sudo cpupower frequency-set -g performance  # 性能模式
-taskset -c 0 ./test          # 绑定CPU0
+taskset -c 0 ./sve_latency_test_optimized  # 绑定CPU0
 ```
 
 ### B. 文件清单
 
 ```
 inst_latency/
-├── sve_latency_test.c              # 原版测试程序
-├── sve_latency_test_optimized.c    # 优化版测试程序
+├── sve_latency_test_optimized.c    # 测试程序源码
+├── sve_latency_test_optimized      # 可执行文件
 ├── Makefile                        # 编译配置
-├── compare_results.py              # 结果对比工具
-├── PRECISION_ANALYSIS_REPORT.md    # 精度分析报告
-├── OPTIMIZATION_SUMMARY.md         # 优化总结
 ├── USER_MANUAL.md                  # 本使用手册
-├── sve_latency_test                # 原版可执行文件
-└── sve_latency_test_optimized      # 优化版可执行文件
+└── .gitignore                      # Git忽略规则
 ```
 
 ### C. 参考资料
@@ -914,22 +800,18 @@ inst_latency/
 1. **ARM Architecture Reference Manual** - SVE指令集规范
 2. **ARM PMU Guide** - 性能监控单元使用指南
 3. **Linux Perf Documentation** - perf工具文档
-4. **Intel/AMD Optimization Manual** - 微基准测试方法论（通用原理）
 
 ---
 
-**文档版本**: v1.0  
-**生成日期**: 2026-04-27  
+**文档版本**: v2.0  
+**更新日期**: 2026-05-06  
 **适用版本**: sve_latency_test_optimized v1.0
 
 ---
 
 ## 反馈与支持
 
-如有问题或建议，请：
-1. 查阅本手册FAQ章节
-2. 查看PRECISION_ANALYSIS_REPORT.md了解精度细节
-3. 查看OPTIMIZATION_SUMMARY.md了解技术改进
+如有问题或建议，请查阅本手册FAQ章节。
 
 ---
 
