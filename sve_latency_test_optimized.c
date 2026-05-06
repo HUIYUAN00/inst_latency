@@ -48,27 +48,7 @@ static uint64_t get_cntvct(void) {
     return cnt;
 }
 
-static uint64_t calibrate_cpu_frequency(void) {
-    uint64_t freq_khz = 0;
-    
-    FILE *fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
-    if (fp) {
-        if (fscanf(fp, "%lu", &freq_khz) == 1 && freq_khz > 0) {
-            fclose(fp);
-            return freq_khz * 1000ULL;
-        }
-        fclose(fp);
-    }
-    
-    fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "r");
-    if (fp) {
-        if (fscanf(fp, "%lu", &freq_khz) == 1 && freq_khz > 0) {
-            fclose(fp);
-            return freq_khz * 1000ULL;
-        }
-        fclose(fp);
-    }
-    
+static uint64_t get_cpu_frequency(void) {
     return 2200000000ULL;
 }
 
@@ -76,7 +56,7 @@ static void init_timer_backend(void) {
     g_cntfrq_hz = get_cntfrq();
     g_tick_to_ns_factor = 1e9 / (double)g_cntfrq_hz;
     
-    g_timer_info.cpu_freq_hz = calibrate_cpu_frequency();
+    g_timer_info.cpu_freq_hz = get_cpu_frequency();
     g_timer_info.name = "System Counter";
     g_timer_info.precision_ns = g_tick_to_ns_factor;
     
