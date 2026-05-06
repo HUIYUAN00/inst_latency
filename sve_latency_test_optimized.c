@@ -23,10 +23,10 @@ typedef enum {
 } timer_mode_t;
 
 typedef struct {
-    uint64_t cycles;
-    uint64_t cntvct_ticks;
-    double ns;
-} timing_result_t;
+    const char *name;
+    double precision_ns;
+    uint64_t cpu_freq_hz;
+} timer_info_t;
 
 typedef struct {
     double mean;
@@ -38,12 +38,10 @@ typedef struct {
 } stats_t;
 
 static timer_mode_t g_timer_mode = TIMER_AUTO;
+static timer_info_t g_timer_info = {0};
 static int g_pmu_available = 0;
-static uint64_t g_cpu_freq_hz = 0;
 static uint64_t g_cntfrq_hz = 0;
-static double g_cycle_to_ns_factor = 0;
 static double g_tick_to_ns_factor = 0;
-static double g_timer_precision_ns = 0;
 static double g_loop_overhead_ns = 0;
 
 static uint64_t get_cntfrq(void) {
@@ -113,20 +111,13 @@ static uint64_t calibrate_cpu_frequency(void) {
         fclose(fp);
     }
     
-    uint64_t cntvct_start, cntvct_end;
-    uint64_t cycles_start = 0, cycles_end = 0;
-    
-    cntvct_start = get_cntvct();
-    if (g_pmu_available) {
-        cycles_start = get_pmu_cycles();
-    }
+    uint64_t cntvct_start = get_cntvct();
+    uint64_t cycles_start = g_pmu_available ? get_pmu_cycles() : 0;
     
     usleep(100000);
     
-    cntvct_end = get_cntvct();
-    if (g_pmu_available) {
-        cycles_end = get_pmu_cycles();
-    }
+    uint64_t cntvct_end = get_cntvct();
+    uint64_t cycles_end = g_pmu_available ? get_pmu_cycles() : 0;
     
     uint64_t cntvct_ticks = cntvct_end - cntvct_start;
     double elapsed_ns = (double)cntvct_ticks * g_tick_to_ns_factor;
@@ -140,12 +131,11 @@ static uint64_t calibrate_cpu_frequency(void) {
     return 2200000000ULL;
 }
 
-static void init_high_precision_timer(void) {
+static void init_timer_backend(void) {
     g_cntfrq_hz = get_cntfrq();
     g_tick_to_ns_factor = 1e9 / (double)g_cntfrq_hz;
     
     g_pmu_available = check_pmu_access();
-    
     if (g_pmu_available) {
         g_pmu_available = enable_pmu_counter();
     }
@@ -154,41 +144,40 @@ static void init_high_precision_timer(void) {
         g_timer_mode = g_pmu_available ? TIMER_PMU_CYCLES : TIMER_CNTVCT;
     }
     
-    g_cpu_freq_hz = calibrate_cpu_frequency();
-    g_cycle_to_ns_factor = 1e9 / (double)g_cpu_freq_hz;
+    g_timer_info.cpu_freq_hz = calibrate_cpu_frequency();
+    double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
     
     if (g_timer_mode == TIMER_PMU_CYCLES && g_pmu_available) {
-        g_timer_precision_ns = g_cycle_to_ns_factor;
+        g_timer_info.name = "PMU Cycles";
+        g_timer_info.precision_ns = cycle_to_ns;
         printf("=== High-Precision Timer (PMU Cycles) ===\n");
         printf("Status: ENABLED\n");
         printf("Method: pmccntr_el0 (CPU cycle counter)\n");
-        printf("Resolution: %.3f ns per cycle\n", g_timer_precision_ns);
-        printf("CPU Frequency: %.3f GHz (calibrated)\n", g_cpu_freq_hz / 1e9);
+        printf("Resolution: %.3f ns per cycle\n", g_timer_info.precision_ns);
+        printf("CPU Frequency: %.3f GHz (calibrated)\n", g_timer_info.cpu_freq_hz / 1e9);
         printf("Precision Improvement: %.0fx vs system counter\n", 
-               (g_tick_to_ns_factor / g_cycle_to_ns_factor));
+               (g_tick_to_ns_factor / cycle_to_ns));
     } else {
-        g_timer_precision_ns = g_tick_to_ns_factor;
+        g_timer_info.name = "System Counter";
+        g_timer_info.precision_ns = g_tick_to_ns_factor;
         printf("=== Standard Timer (System Counter) ===\n");
         printf("Status: PMU unavailable, using fallback\n");
         printf("Method: cntvct_el0 (system counter)\n");
-        printf("Resolution: %.2f ns per tick\n", g_timer_precision_ns);
+        printf("Resolution: %.2f ns per tick\n", g_timer_info.precision_ns);
         printf("Counter Frequency: %.2f MHz\n", g_cntfrq_hz / 1e6);
-        printf("CPU Frequency: %.3f GHz\n", g_cpu_freq_hz / 1e9);
+        printf("CPU Frequency: %.3f GHz\n", g_timer_info.cpu_freq_hz / 1e9);
     }
 }
 
-static timing_result_t get_current_time(void) {
-    timing_result_t result = {0};
-    
+static double get_time_ns(void) {
     if (g_timer_mode == TIMER_PMU_CYCLES && g_pmu_available) {
-        result.cycles = get_pmu_cycles();
-        result.ns = (double)result.cycles * g_cycle_to_ns_factor;
+        uint64_t cycles = get_pmu_cycles();
+        double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
+        return (double)cycles * cycle_to_ns;
     } else {
-        result.cntvct_ticks = get_cntvct();
-        result.ns = (double)result.cntvct_ticks * g_tick_to_ns_factor;
+        uint64_t ticks = get_cntvct();
+        return (double)ticks * g_tick_to_ns_factor;
     }
-    
-    return result;
 }
 
 static stats_t compute_detailed_stats(double *values, int n) {
@@ -235,7 +224,7 @@ static void calibrate_loop_overhead(void) {
     
     for (int run = 0; run < NUM_RUNS; run++) {
         asm volatile("isb" ::: "memory");
-        timing_result_t start = get_current_time();
+        double start = get_time_ns();
         asm volatile("isb" ::: "memory");
         
         asm volatile (
@@ -249,17 +238,10 @@ static void calibrate_loop_overhead(void) {
         );
         
         asm volatile("isb" ::: "memory");
-        timing_result_t end = get_current_time();
+        double end = get_time_ns();
         asm volatile("isb" ::: "memory");
         
-        double elapsed_ns;
-        if (g_timer_mode == TIMER_PMU_CYCLES) {
-            elapsed_ns = (double)(end.cycles - start.cycles) * g_cycle_to_ns_factor;
-        } else {
-            elapsed_ns = (double)(end.cntvct_ticks - start.cntvct_ticks) * g_tick_to_ns_factor;
-        }
-        
-        overheads[run] = elapsed_ns;
+        overheads[run] = end - start;
     }
     
     stats_t s = compute_detailed_stats(overheads, NUM_RUNS);
@@ -277,8 +259,9 @@ static void print_result_with_precision(const char *test_name, stats_t s) {
     printf("\n=== %s ===\n", test_name);
     
     if (g_timer_mode == TIMER_PMU_CYCLES) {
-        double cycles = s.mean / g_cycle_to_ns_factor;
-        double cycles_error = s.sem / g_cycle_to_ns_factor;
+        double cycle_to_ns = 1e9 / (double)g_timer_info.cpu_freq_hz;
+        double cycles = s.mean / cycle_to_ns;
+        double cycles_error = s.sem / cycle_to_ns;
         printf("Cycles: %.2f cycles (mean) ± %.2f cycles\n", cycles, cycles_error);
     }
     
@@ -309,7 +292,7 @@ static void test_ldr_throughput_optimized(void) {
     
     for (int run = 0; run < NUM_RUNS; run++) {
         asm volatile("isb" ::: "memory");
-        timing_result_t start = get_current_time();
+        double start = get_time_ns();
         asm volatile("isb" ::: "memory");
         
         asm volatile (
@@ -357,16 +340,10 @@ static void test_ldr_throughput_optimized(void) {
         );
         
         asm volatile("isb" ::: "memory");
-        timing_result_t end = get_current_time();
+        double end = get_time_ns();
         asm volatile("isb" ::: "memory");
         
-        double elapsed_ns;
-        if (g_timer_mode == TIMER_PMU_CYCLES) {
-            elapsed_ns = (double)(end.cycles - start.cycles) * g_cycle_to_ns_factor;
-        } else {
-            elapsed_ns = (double)(end.cntvct_ticks - start.cntvct_ticks) * g_tick_to_ns_factor;
-        }
-        
+        double elapsed_ns = end - start;
         double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
         results[run] = adjusted_ns / (double)ITERATIONS;
     }
@@ -395,14 +372,13 @@ static void test_ldr_latency_optimized(void) {
     
     for (int run = 0; run < NUM_RUNS; run++) {
         asm volatile("isb" ::: "memory");
-        timing_result_t start = get_current_time();
+        double start = get_time_ns();
         asm volatile("isb" ::: "memory");
         
         asm volatile (
             "mov x1, %[count]\n"
             "mov x0, %[ptr]\n"
             "1:\n"
-            "ldr x0, [x0]\n"
             "ldr x0, [x0]\n"
             "ldr x0, [x0]\n"
             "ldr x0, [x0]\n"
@@ -442,16 +418,10 @@ static void test_ldr_latency_optimized(void) {
         );
         
         asm volatile("isb" ::: "memory");
-        timing_result_t end = get_current_time();
+        double end = get_time_ns();
         asm volatile("isb" ::: "memory");
         
-        double elapsed_ns;
-        if (g_timer_mode == TIMER_PMU_CYCLES) {
-            elapsed_ns = (double)(end.cycles - start.cycles) * g_cycle_to_ns_factor;
-        } else {
-            elapsed_ns = (double)(end.cntvct_ticks - start.cntvct_ticks) * g_tick_to_ns_factor;
-        }
-        
+        double elapsed_ns = end - start;
         double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
         results[run] = adjusted_ns / (double)ITERATIONS;
     }
@@ -459,7 +429,7 @@ static void test_ldr_latency_optimized(void) {
     stats_t s = compute_detailed_stats(results, NUM_RUNS);
     print_result_with_precision("LDR Latency (Dependency Chain)", s);
     
-    free(data);
+free(data);
 }
 
 static void test_fmla_latency_optimized(void) {
@@ -468,7 +438,7 @@ static void test_fmla_latency_optimized(void) {
     
     for (int run = 0; run < NUM_RUNS; run++) {
         asm volatile("isb" ::: "memory");
-        timing_result_t start = get_current_time();
+        double start = get_time_ns();
         asm volatile("isb" ::: "memory");
         
         asm volatile (
@@ -509,7 +479,6 @@ static void test_fmla_latency_optimized(void) {
             "fmla z0.s, p0/m, z1.s, z2.s\n"
             "fmla z0.s, p0/m, z1.s, z2.s\n"
             "fmla z0.s, p0/m, z1.s, z2.s\n"
-            "fmla z0.s, p0/m, z1.s, z2.s\n"
             "subs x0, x0, #1\n"
             "b.ne 1b\n"
             : 
@@ -518,16 +487,10 @@ static void test_fmla_latency_optimized(void) {
         );
         
         asm volatile("isb" ::: "memory");
-        timing_result_t end = get_current_time();
+        double end = get_time_ns();
         asm volatile("isb" ::: "memory");
         
-        double elapsed_ns;
-        if (g_timer_mode == TIMER_PMU_CYCLES) {
-            elapsed_ns = (double)(end.cycles - start.cycles) * g_cycle_to_ns_factor;
-        } else {
-            elapsed_ns = (double)(end.cntvct_ticks - start.cntvct_ticks) * g_tick_to_ns_factor;
-        }
-        
+        double elapsed_ns = end - start;
         double adjusted_ns = elapsed_ns - g_loop_overhead_ns;
         results[run] = adjusted_ns / (double)ITERATIONS;
     }
@@ -539,7 +502,7 @@ static void test_fmla_latency_optimized(void) {
 static void print_precision_comparison(void) {
     printf("\n=== Precision Analysis Summary ===\n");
     
-    double pmu_precision = g_cycle_to_ns_factor;
+    double pmu_precision = 1e9 / (double)g_timer_info.cpu_freq_hz;
     double cntvct_precision = g_tick_to_ns_factor;
     
     printf("Timer precision comparison:\n");
@@ -557,7 +520,7 @@ static void print_precision_comparison(void) {
     printf("  Iterations: %d per test\n", ITERATIONS);
     printf("  Statistical runs: %d\n", NUM_RUNS);
     printf("  Effective resolution: %.6f ns\n", 
-           g_timer_precision_ns / (double)ITERATIONS);
+           g_timer_info.precision_ns / (double)ITERATIONS);
 }
 
 int main(void) {
@@ -575,7 +538,7 @@ int main(void) {
            (unsigned long)svcntb() * 8, (unsigned long)svcntb());
 #endif
     
-    init_high_precision_timer();
+    init_timer_backend();
     
     printf("\nTest Configuration:\n");
     printf("  Iterations: %d (unroll: %d)\n", ITERATIONS, UNROLL_FACTOR);
