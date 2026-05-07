@@ -8,10 +8,9 @@
 4. [详细使用说明](#详细使用说明)
 5. [结果解读指南](#结果解读指南)
 6. [精度分析方法](#精度分析方法)
-7. [高级配置](#高级配置)
-8. [常见问题](#常见问题)
-9. [技术原理说明](#技术原理说明)
-10. [性能优化建议](#性能优化建议)
+7. [常见问题](#常见问题)
+8. [技术原理说明](#技术原理说明)
+9. [性能优化建议](#性能优化建议)
 
 ---
 
@@ -19,21 +18,19 @@
 
 ### 1.1 工具简介
 
-本工具用于精确测量AArch64架构下SVE（Scalable Vector Extension）指令的延迟和吞吐量。支持：
+本工具用于测量AArch64架构下指令的延迟和吞吐量。支持：
 
-- **标量指令**: LDR/STR 内存访问
-- **SVE向量指令**: LD1W/ST1W/FMLA/FCMLA
-- **预取指令**: PRFM（多种hint类型）
+- **标量指令**: LDR内存访问吞吐量与延迟
+- **SVE向量指令**: FMLA延迟测试
 
 ### 1.2 核心特性
 
 | 特性 | 说明 |
 |-----|------|
-| **高精度计时** | PMU cycles计数器优先（0.45ns精度），cntvct备选（10ns精度） |
-| **统计准确性** | SEM（标准误差）+ 相对误差百分比，真实反映测量不确定性 |
-| **智能降级** | PMU不可用时自动切换cntvct，保证测试正常运行 |
-| **完整输出** | 范围[min,max]、误差、精度警告，避免误导性结果 |
-| **CPU频率校准** | 动态测量实际CPU频率，消除DVFS/温度影响 |
+| **系统计数器计时** | cntvct_el0系统计数器（10ns精度） |
+| **统计准确性** | SEM（标准误差）+ 相对误差百分比 |
+| **完整输出** | 范围[min,max]、误差、精度警告 |
+| **命令行配置** | --iterations和--runs参数 |
 
 ### 1.3 测试覆盖
 
@@ -41,7 +38,6 @@
 |---------|---------|---------|
 | **吞吐量测试** | 独立操作序列，消除依赖 | 平均延迟、吞吐量、SEM误差 |
 | **延迟测试** | 依赖链序列，强制串行 | 真实延迟、吞吐量、SEM误差 |
-| **预取测试** | PRFM不同hint类型 | Issue时间、吞吐量 |
 
 ---
 
@@ -53,7 +49,6 @@
 |-------|------|
 | **处理器架构** | AArch64 (ARM64) |
 | **SVE支持** | ARMv8-A + SVE扩展 |
-| **PMU支持** | 可选，建议启用（精度提升22x） |
 | **内存** | ≥16MB（测试数组8MB） |
 | **推荐CPU** | Neoverse N1/N2, Cortex-A76/A78/X1 |
 
@@ -64,21 +59,6 @@
 | **操作系统** | Linux (内核≥4.15) |
 | **编译器** | GCC ≥9.0 或 Clang ≥10.0 |
 | **C库** | glibc或musl |
-
-### 2.3 权限要求
-
-```bash
-# PMU访问权限检查（可选，提升精度）
-cat /proc/sys/kernel/perf_event_paranoid
-# 输出值:
-#   ≥2: PMU完全禁用（仅cntvct可用）
-#   1:  部分PMU功能可用
-#   0:  PMU完全启用（推荐）
-#  -1:  无限制（最理想）
-
-# 启用PMU访问（需要root权限）
-sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
-```
 
 ---
 
@@ -110,17 +90,19 @@ make run
 
 # 或直接运行
 ./sve_latency_test_optimized
+
+# 自定义参数
+./sve_latency_test_optimized --iterations 10000000 --runs 10
 ```
 
 ### 3.3 查看结果
 
 ```
-=== High-Precision Timer (PMU Cycles) ===
-Status: ENABLED
-Method: pmccntr_el0 (CPU cycle counter)
-Resolution: 0.455 ns per cycle
-CPU Frequency: 2.200 GHz (calibrated)
-Precision Improvement: 22x vs system counter
+=== System Counter Timer ===
+Method: cntvct_el0 (system counter)
+Resolution: 10.00 ns per tick
+Counter Frequency: 100.00 MHz
+CPU Frequency: 2.200 GHz
 
 === LDR Throughput ===
 Latency: 0.128 ns (mean) ± 0.001 ns (SEM)
@@ -135,15 +117,26 @@ Throughput: 7805.54 M ops/sec
 
 ### 4.1 配置参数
 
-目前工具通过源码宏配置：
+命令行参数：
+
+```bash
+./sve_latency_test_optimized [options]
+
+Options:
+  --iterations <num>  Set iterations per test (default: 10000000)
+  --runs <num>        Set statistical runs (default: 10)
+  --help              Show help message
+```
+
+源码默认配置：
 
 ```c
 // sve_latency_test_optimized.c
 
-#define ITERATIONS 10000000      // 每次测试迭代次数
-#define UNROLL_FACTOR 32         // 循环展开因子
-#define NUM_RUNS 10              // 统计采样次数
-#define ARRAY_SIZE (1024*1024)   // 测试数组大小
+#define DEFAULT_ITERATIONS 10000000  // 每次测试迭代次数
+#define UNROLL_FACTOR 32             // 循环展开因子
+#define DEFAULT_NUM_RUNS 10          // 统计采样次数
+#define ARRAY_SIZE (1024*1024)       // 测试数组大小
 ```
 
 ### 4.2 运行流程
@@ -151,19 +144,18 @@ Throughput: 7805.54 M ops/sec
 ```
 初始化阶段:
   1. SVE能力检测
-  2. PMU权限检查 → 选择计时器模式
-  3. CPU频率校准
-  4. Cache预热
+  2. 系统计数器初始化
+  3. Cache预热
 
 测试阶段:
-  5. Loop开销校准（统计10次）
-  6. 执行各项测试（LDR/STR/SVE指令）
-  7. 数据采集（每次测试10次采样）
+  4. Loop开销校准（统计10次）
+  5. 执行各项测试（LDR吞吐量、LDR延迟、FMLA延迟）
+  6. 数据采集（每次测试10次采样）
 
 输出阶段:
-  8. 统计计算（mean, SEM, error_pct）
-  9. 精度分析总结
-  10. 结果展示
+  7. 统计计算（mean, SEM, error_pct）
+  8. 精度分析总结
+  9. 结果展示
 ```
 
 ### 4.3 输出格式详解
@@ -171,19 +163,9 @@ Throughput: 7805.54 M ops/sec
 #### 计时器配置输出
 
 ```
-=== High-Precision Timer (PMU Cycles) ===  ← PMU可用时
-Status: ENABLED
-Method: pmccntr_el0 (CPU cycle counter)
-Resolution: 0.455 ns per cycle           ← 高精度
-CPU Frequency: 2.200 GHz (calibrated)
-Precision Improvement: 22x vs system counter
-
-或
-
-=== Standard Timer (System Counter) ===   ← PMU不可用时
-Status: PMU unavailable, using fallback
+=== System Counter Timer ===
 Method: cntvct_el0 (system counter)
-Resolution: 10.00 ns per tick             ← 标准精度
+Resolution: 10.00 ns per tick
 Counter Frequency: 100.00 MHz
 CPU Frequency: 2.200 GHz
 ```
@@ -193,35 +175,34 @@ CPU Frequency: 2.200 GHz
 ```
 === Loop Overhead Calibration ===
 Overhead: 142218.000 ns (mean) ± 10.729 ns (SEM)
-Per-iteration: 0.014222 ns                ← 每迭代开销
-Error contribution: 0.01%                 ← 对测量误差贡献
+Per-iteration: 0.014222 ns
+Error contribution: 0.01%
 ```
 
 #### 测试结果输出
 
 ```
 === LDR Throughput ===
-Latency: 0.128 ns (mean) ± 0.000 ns (SEM) ← 均值+标准误差
-Range: [0.128, 0.129] ns                  ← 测量范围
-Relative error: ±0.11%                    ← 相对误差百分比
-Throughput: 7805.54 M ops/sec             ← 吞吐量
+Latency: 0.128 ns (mean) ± 0.000 ns (SEM)
+Range: [0.128, 0.129] ns
+Relative error: ±0.11%
+Throughput: 7805.54 M ops/sec
 
-[可选] WARNING: High measurement uncertainty (>10%) ← 精度警告
+[可选] WARNING: High measurement uncertainty (>10%)
 ```
 
 #### 精度分析输出
 
 ```
 === Precision Analysis Summary ===
-Timer precision comparison:
-  PMU cycles: 0.455 ns (current)          ← 当前计时器精度
-  cntvct: 10.00 ns (alternative)          ← 备选精度
-  Improvement: 22x                        ← 精度倍数
+Timer: System Counter (cntvct_el0)
+Resolution: 10.00 ns per tick
+Counter Frequency: 100.00 MHz
 
 Measurement methodology:
-  Iterations: 10000000 per test           ← 迭代次数
-  Statistical runs: 10                    ← 统计采样数
-  Effective resolution: 0.000001 ns       ← 有效分辨率
+  Iterations: 10000000 per test
+  Statistical runs: 10
+  Effective resolution: 0.000001 ns
 ```
 
 ---
@@ -307,12 +288,11 @@ LDR延迟:   1.873 ns = 单次依赖链LDR耗时约4周期
 
 ```
 第1层: 计时器硬件精度
-  - PMU cycles: 0.45ns (CPU周期)
   - cntvct: 10ns (系统计数器)
 
 第2层: 累积测量精度
   - 10M迭代累积: 分辨率提升10000000倍
-  - 有效分辨率: 0.45ns/10M = 0.000000045ns
+  - 有效分辨率: 10ns/10M = 0.000001ns
 
 第3层: 统计精度
   - 10次采样: SEM = stddev/√10
@@ -328,156 +308,54 @@ LDR延迟:   1.873 ns = 单次依赖链LDR耗时约4周期
 
 | 误差来源 | 量级 | 特性 | 消除方法 |
 |---------|------|------|---------|
-| **量化误差** | 0.45ns或10ns | 系统性 | 累积测量消除 |
+| **量化误差** | 10ns | 系统性 | 累积测量消除 |
 | **Loop开销** | 0.01ns | 系统性 | 扣除校准值 |
 | **Cache随机** | 0.05ns | 随机性 | 统计平均降低 |
 | **Timer读取** | 1ns | 系统性 | ISB屏障消除 |
-| **DVFS波动** | ±9% | 随机性 | CPU频率校准 |
 
-### 6.3 真实精度评估
+### 6.3 提升精度方法
 
-**PMU可用环境**:
-```
-单次测量精度: 0.45ns
-累积后精度: ±0.002ns (统计)
-相对误差: <2% (对sub-ns测量可信)
-```
-
-**PMU不可用环境**:
-```
-单次测量精度: 10ns
-累积后精度: ±0.05ns (统计+系统误差)
-相对误差: ±40% (对sub-ns测量不可信)
-```
-
-### 6.4 提升精度方法
-
-#### 方法1: 启用PMU
+#### 方法1: 增加迭代次数
 
 ```bash
-# 检查当前状态
-cat /proc/sys/kernel/perf_event_paranoid
+# 增加迭代次数
+./sve_latency_test_optimized --iterations 100000000
 
-# 启用PMU（root权限）
-sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
-
-# 验证PMU可用
-perf stat -e cycles ls
+# 效果
+量化误差: 从±0.001ns降至±0.0001ns
 ```
 
-#### 方法2: 增加迭代次数
+#### 方法2: 增加采样次数
 
-```c
-// 修改源码
-#define ITERATIONS 100000000  // 从10M增加到100M
+```bash
+# 增加采样次数
+./sve_latency_test_optimized --runs 20
 
-// 效果
-量化误差: 从±0.05ns降至±0.005ns
-相对误差: 从±40%降至±4%
-```
-
-#### 方法3: 增加采样次数
-
-```c
-// 修改源码
-#define NUM_RUNS 20  // 从10增加到20
-
-// 效果
+# 效果
 SEM降低: √20/√10 = 1.41倍
 ```
 
-#### 方法4: CPU亲和性绑定
+#### 方法3: CPU亲和性绑定
 
-```c
-// 在main()开头添加
-#include <sched.h>
-cpu_set_t cpuset;
-CPU_ZERO(&cpuset);
-CPU_SET(0, &cpuset);  // 绑定到CPU 0
-sched_setaffinity(0, sizeof(cpuset), &cpuset);
+```bash
+# 绑定到CPU 0
+taskset -c 0 ./sve_latency_test_optimized
 ```
 
-#### 方法5: 提升优先级
+#### 方法4: 提升优先级
 
-```c
-// 在main()开头添加
-#include <sys/resource.h>
-setpriority(PRIO_PROCESS, 0, -20);  // 最高优先级
-```
-
----
-
-## 高级配置
-
-### 7.1 计时器模式选择
-
-```c
-// sve_latency_test_optimized.c
-
-typedef enum {
-    TIMER_PMU_CYCLES,  // 强制使用PMU（PMU不可用会失败）
-    TIMER_CNTVCT,      // 强制使用cntvct
-    TIMER_AUTO         // 自动选择（PMU优先，备选cntvct）
-} timer_mode_t;
-
-static timer_mode_t g_timer_mode = TIMER_AUTO;  // 推荐默认
-```
-
-**模式说明**:
-- `TIMER_AUTO`: 智能选择，PMU可用时用PMU，否则cntvct（推荐）
-- `TIMER_PMU_CYCLES`: 仅PMU，PMU不可用时测试失败（高精度场景）
-- `TIMER_CNTVCT`: 仅cntvct，兼容性最好（兼容性测试）
-
-### 7.2 测试参数调优
-
-```c
-// 针对不同场景的推荐配置
-
-// 场景1: 快速测试（开发调试）
-#define ITERATIONS 1000000
-#define NUM_RUNS 3
-
-// 场景2: 标准测试（性能评估）
-#define ITERATIONS 10000000
-#define NUM_RUNS 10
-
-// 场景3: 高精度测试（科研论文）
-#define ITERATIONS 100000000
-#define NUM_RUNS 20
-
-// 场景4: 极限测试（硬件验证）
-#define ITERATIONS 1000000000
-#define NUM_RUNS 50
-```
-
-### 7.3 Cache预热强度
-
-```c
-// 当前实现
-static void warmup_cache(void) {
-    volatile uint64_t *dummy = aligned_alloc(64, 1024*1024);
-    for (int i = 0; i < 131072; i++) dummy[i] = i;  // 1MB预热
-    free((void*)dummy);
-}
-
-// 增强预热（消除Cold Cache影响）
-static void warmup_cache_enhanced(void) {
-    volatile uint64_t *dummy = aligned_alloc(64, 8*1024*1024);
-    for (int i = 0; i < 1048576; i++) dummy[i] = i;  // 8MB预热
-    for (int j = 0; j < 3; j++) {  // 多次预热
-        for (int i = 0; i < 1048576; i++) dummy[i] += j;
-    }
-    free((void*)dummy);
-}
+```bash
+# 最高优先级
+sudo nice -n -20 ./sve_latency_test_optimized
 ```
 
 ---
 
 ## 常见问题
 
-### 8.1 编译错误
+### 7.1 编译错误
 
-**问题1: SVE未支持**
+**问题: SVE未支持**
 
 ```
 错误: #error "SVE is not supported"
@@ -495,45 +373,9 @@ gcc -march=armv8-a+sve sve_latency_test_optimized.c
 armclang -march=armv8.2-a+sve sve_latency_test_optimized.c
 ```
 
-**问题2: PMU寄存器未定义**
+### 7.2 运行时错误
 
-```
-错误: 'pmccntr_el0' undeclared
-```
-
-**解决**:
-```bash
-# GCC需要特定版本支持PMU寄存器名
-gcc --version  # 需要≥10.0
-
-# 使用数字编码替代（GCC<10）
-asm volatile ("mrs %0, pmccntr_el0" : "=r"(cycles));
-// 替代为
-asm volatile ("mrs %0, s3_14_c15_c10_5" : "=r"(cycles));
-```
-
-### 8.2 运行时错误
-
-**问题1: PMU不可用**
-
-```
-输出: PMU unavailable, using fallback
-```
-
-**解决**:
-```bash
-# 方法1: 修改系统权限（需要root）
-sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
-
-# 方法2: 使用perf包装运行
-perf stat -e cycles ./sve_latency_test_optimized
-
-# 方法3: 使用cntvct模式继续测试
-// 修改源码
-g_timer_mode = TIMER_CNTVCT;
-```
-
-**问题2: SVE Vector Length异常**
+**问题: SVE Vector Length异常**
 
 ```
 输出: SVE Vector Length: 128 bits (预期256 bits)
@@ -550,7 +392,7 @@ cat /proc/cpuinfo | grep "SVE"
 # 程序已自动检测，无需修改
 ```
 
-### 8.3 测试结果异常
+### 7.3 测试结果异常
 
 **问题1: 延迟值过大**
 
@@ -559,7 +401,7 @@ LDR延迟: 50 ns (预期<2ns)
 ```
 
 **可能原因**:
-1. Cache/TLB未预热 → 添加warmup_cache_enhanced()
+1. Cache/TLB未预热 → 检查warmup_cache
 2. 内存分配未对齐 → 使用aligned_alloc(64, size)
 3. 数据链断裂 → 检查指针链构造逻辑
 
@@ -581,21 +423,19 @@ Relative error: ±50% (预期<5%)
 ```
 
 **解决**:
-```c
-// 增加迭代次数
-#define ITERATIONS 100000000
+```bash
+# 增加迭代次数
+./sve_latency_test_optimized --iterations 100000000
 
-// 增加采样次数
-#define NUM_RUNS 20
-
-// 启用PMU（如果可用）
+# 增加采样次数
+./sve_latency_test_optimized --runs 20
 ```
 
 ---
 
 ## 技术原理说明
 
-### 9.1 时间累积原理
+### 8.1 时间累积原理
 
 **基本原理**:
 ```
@@ -625,7 +465,7 @@ Relative error: ±50% (预期<5%)
 结论: N次累积后，精度从δ提升到δ/N
 ```
 
-### 9.2 循环展开原理
+### 8.2 循环展开原理
 
 **目的**: 减少循环控制开销占比
 
@@ -647,7 +487,7 @@ Relative error: ±50% (预期<5%)
   循环开销占比: 1/32 = 3%
 ```
 
-### 9.3 依赖链测量原理
+### 8.3 依赖链测量原理
 
 **吞吐量测试 vs 延迟测试**:
 
@@ -667,18 +507,7 @@ Relative error: ±50% (预期<5%)
   测量: 单操作真实延迟 = 延迟
 ```
 
-### 9.4 PMU计数器原理
-
-**PMU cycles计数器**:
-```
-寄存器: pmccntr_el0
-计数内容: CPU执行的周期数
-精度: 1 cycle (0.45ns at 2.2GHz)
-特性: 
-  - 只增不减（除非手动清零）
-  - 32位计数器，需处理溢出（返回值<<1扩展）
-  - 需要权限启用（perf_event_paranoid≤0）
-```
+### 8.4 系统计数器原理
 
 **cntvct系统计数器**:
 ```
@@ -691,7 +520,7 @@ Relative error: ±50% (预期<5%)
   - 无需特殊权限，总是可用
 ```
 
-### 9.5 统计原理
+### 8.5 统计原理
 
 **标准误差(SEM)**:
 ```
@@ -725,7 +554,7 @@ Relative error: ±50% (预期<5%)
 
 ## 性能优化建议
 
-### 10.1 测试环境优化
+### 9.1 测试环境优化
 
 ```bash
 # 1. 禁用省电模式
@@ -741,13 +570,12 @@ sudo nice -n -20 ./sve_latency_test_optimized
 # 建议在最小系统环境下测试
 ```
 
-### 10.2 测试流程优化
+### 9.2 测试流程优化
 
 ```bash
 # 推荐测试流程:
 
 # 1. 环境准备
-sudo echo 0 > /proc/sys/kernel/perf_event_paranoid
 sudo cpupower frequency-set -g performance
 
 # 2. 编译
@@ -774,10 +602,7 @@ make clean              # 清理编译产物
 # 运行
 make run                # 编译并运行
 ./sve_latency_test_optimized  # 直接运行
-
-# PMU权限
-cat /proc/sys/kernel/perf_event_paranoid  # 查看权限
-sudo echo 0 > /proc/sys/kernel/perf_event_paranoid  # 启用
+./sve_latency_test_optimized --iterations 10000000 --runs 10  # 自定义参数
 
 # CPU设置
 sudo cpupower frequency-set -g performance  # 性能模式
@@ -788,7 +613,11 @@ taskset -c 0 ./sve_latency_test_optimized  # 绑定CPU0
 
 ```
 inst_latency/
-├── sve_latency_test_optimized.c    # 测试程序源码
+├── main.c                          # 主程序入口
+├── timer.c / timer.h               # 计时器模块
+├── stats.c / stats.h               # 统计计算模块
+├── benchmark.c / benchmark.h       # 性能测试模块
+├── test.c / test.h                 # 测试包装模块
 ├── sve_latency_test_optimized      # 可执行文件
 ├── Makefile                        # 编译配置
 ├── USER_MANUAL.md                  # 本使用手册
@@ -798,12 +627,11 @@ inst_latency/
 ### C. 参考资料
 
 1. **ARM Architecture Reference Manual** - SVE指令集规范
-2. **ARM PMU Guide** - 性能监控单元使用指南
-3. **Linux Perf Documentation** - perf工具文档
+2. **ARM System Counter Guide** - cntvct_el0计数器使用指南
 
 ---
 
-**文档版本**: v2.0  
+**文档版本**: v3.0  
 **更新日期**: 2026-05-06  
 **适用版本**: sve_latency_test_optimized v1.0
 
